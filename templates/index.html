@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Universal TM Visualizer - Web</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <!-- Top full-width control bar -->
+  <div id="topbar">
+    <div id="left-controls">
+      <label for="examples">Examples:</label>
+      <select id="examples">
+        <option>Replace a→b</option>
+        <option>Move right until blank</option>
+        <option>Unary increment</option>
+        <option>Long demo (big tape)</option>
+      </select>
+      <button id="loadBtn">Load</button>
+    </div>
+
+    <div id="center-controls">
+      <button id="parseBtn">Parse & Create TM</button>
+      <button id="resetBtn">Reset</button>
+      <button id="stepBtn">Step ▶</button>
+      <button id="runBtn">Run ▶▶</button>
+      <button id="stopBtn">Stop ■</button>
+    </div>
+
+    <div id="right-controls">
+      <label>Speed</label>
+      <input id="speed" type="range" min="0.05" max="1" value="0.25" step="0.05">
+    </div>
+  </div>
+
+  <!-- Second row: description textarea (full width) -->
+  <div id="desc-row">
+    <textarea id="desc" spellcheck="false"></textarea>
+  </div>
+
+  <!-- Main content: left area (info) + right area (canvas) -->
+  <div id="main">
+    <div id="info-panel">
+      <div class="info-block"><b>State:</b> <span id="stateText">-</span></div>
+      <div class="info-block"><b>Tape length:</b> <span id="tapeLen">-</span></div>
+      <div class="info-block small">Tip: Edit transitions above, press <em>Parse & Create TM</em>, then Step/Run.</div>
+    </div>
+
+    <div id="canvas-panel">
+      <canvas id="tapeCanvas" width="1500" height="340"></canvas>
+      <div id="infoSection" style="text-align:center; margin-top:12px;">
+  <p id="stateInfo" style="font-weight:bold; color:black;">State: -</p>
+  <p id="tapeInfo" style="color:black;">Tape length: -</p>
+</div>
+
+
+    </div>
+  </div>
+
+<script>
+// ---------- Turing Machine model in JS (matches Python logic) ----------
+class TuringMachine {
+  constructor(tapeStr="_", transitions={}, startState="q0", acceptState="q_accept", rejectState="q_reject", blank="_"){
+    this.blank = blank;
+    this.tape = tapeStr.split("");
+    if(this.tape.length === 0) this.tape = [this.blank];
+    this.head = 0;
+    this.startState = startState;
+    this.state = startState;
+    this.acceptState = acceptState;
+    this.rejectState = rejectState;
+    this.transitions = transitions; // keys: "state,symbol" -> [write, move, newState]
+  }
+
+  ensureBounds(){
+    if(this.head < 0){
+      this.tape.unshift(this.blank);
+      this.head = 0;
+    } else if(this.head >= this.tape.length){
+      this.tape.push(this.blank);
+    }
+  }
+
+  step(){
+    if(this.state === this.acceptState || this.state === this.rejectState) return false;
+    this.ensureBounds();
+    const sym = this.tape[this.head] || this.blank;
+    const key = this.state + "," + sym;
+    if(!(key in this.transitions)){
+      this.state = this.rejectState;
+      return false;
+    }
+    const [write, move, nextState] = this.transitions[key];
+    this.tape[this.head] = write;
+    if(move === "R") this.head++;
+    else if(move === "L") this.head--;
+    this.state = nextState;
+    return true;
+  }
+
+  reset(tapeStr){
+    this.tape = tapeStr.split("");
+    if(this.tape.length === 0) this.tape = [this.blank];
+    this.head = 0;
+    this.state = this.startState;
+  }
+}
+
+// ---------- UI wiring ----------
+const desc = document.getElementById("desc");
+const examples = document.getElementById("examples");
+const loadBtn = document.getElementById("loadBtn");
+const parseBtn = document.getElementById("parseBtn");
+const resetBtn = document.getElementById("resetBtn");
+const stepBtn = document.getElementById("stepBtn");
+const runBtn = document.getElementById("runBtn");
+const stopBtn = document.getElementById("stopBtn");
+const stateText = document.getElementById("stateText");
+const tapeLen = document.getElementById("tapeLen");
+const speedInput = document.getElementById("speed");
+
+const canvas = document.getElementById("tapeCanvas");
+const ctx = canvas.getContext("2d");
+
+let tm = null;
+let running = false;
+let runTimer = null;
+
+// default examples
+const SAMPLE = {
+  "Replace a→b": `# Replace all 'a' with 'b' then halt
+q0,a -> b,R,q0
+q0,b -> b,R,q0
+q0,_ -> _,S,q_accept
+START: q0
+ACCEPT: q_accept
+REJECT: q_reject
+TAPE: aaab_`,
+  "Move right until blank": `# Move right until blank then accept
+q0,a -> a,R,q0
+q0,b -> b,R,q0
+q0,_ -> _,S,q_accept
+START: q0
+ACCEPT: q_accept
+REJECT: q_reject
+TAPE: abba_`,
+  "Unary increment": `# Unary increment: add one more 1 then halt
+q0,1 -> 1,R,q0
+q0,_ -> 1,S,q_accept
+START: q0
+ACCEPT: q_accept
+REJECT: q_reject
+TAPE: 111_`,
+  "Long demo (big tape)": `# Long demo for big tape
+q0,a -> a,R,q0
+q0,b -> b,R,q0
+q0,_ -> _,S,q_accept
+START: q0
+ACCEPT: q_accept
+REJECT: q_reject
+TAPE: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbb_`
+};
+
+// load example
+loadBtn.addEventListener("click", () => {
+  const sel = examples.value;
+  desc.value = SAMPLE[sel] || "";
+});
+
+// parse description -> create TM
+parseBtn.addEventListener("click", () => {
+  try {
+    const parsed = parseDescription(desc.value);
+    tm = new TuringMachine(parsed.tape, parsed.transitions, parsed.start, parsed.accept, parsed.reject);
+    updateUI();
+    drawTape();
+    alert("TM created: start=" + parsed.start + " accept=" + parsed.accept + " reject=" + parsed.reject);
+  } catch (e) {
+    alert("Parse error: " + e.message);
+  }
+});
+
+resetBtn.addEventListener("click", () => {
+  if(!tm) return;
+  const parsed = parseDescription(desc.value);
+  tm.transitions = parsed.transitions;
+  tm.startState = parsed.start;
+  tm.acceptState = parsed.accept;
+  tm.rejectState = parsed.reject;
+  tm.reset(parsed.tape);
+  updateUI();
+  drawTape();
+});
+
+stepBtn.addEventListener("click", () => {
+  if(!tm) return;
+  const progressed = tm.step();
+  updateUI();
+  drawTape();
+  if(!progressed) alert("Machine halted in state: " + tm.state);
+});
+
+runBtn.addEventListener("click", () => {
+  if(!tm) return;
+  if(running) return;
+  running = true;
+  runLoop();
+});
+
+stopBtn.addEventListener("click", () => {
+  running = false;
+  if(runTimer) {
+    clearTimeout(runTimer);
+    runTimer = null;
+  }
+});
+
+// parse TM description
+function parseDescription(text){
+  const lines = text.split("\n").map(l=>l.trim());
+  const transitions = {};
+  let start = "q0", accept = "q_accept", reject = "q_reject", tape = "_";
+  for(let raw of lines){
+    if(!raw || raw.startsWith("#")) continue;
+    if(raw.includes("->")){
+      const [left,right] = raw.split("->").map(s=>s.trim());
+      if(!left.includes(",")) throw new Error("Bad LHS: " + raw);
+      const [state,symbol] = left.split(",").map(s=>s.trim());
+      const parts = right.split(",").map(s=>s.trim());
+      if(parts.length < 3) throw new Error("Bad RHS: " + raw);
+      let [write, move, newState] = parts;
+      if(symbol.toLowerCase() === "blank") symbol="_";
+      if(write.toLowerCase() === "blank") write="_";
+      transitions[state + "," + symbol] = [write, move.toUpperCase(), newState];
+    } else if(raw.includes(":")){
+      const [k,v] = raw.split(":").map(s=>s.trim());
+      const K = k.toUpperCase();
+      if(K==="START") start = v;
+      else if(K==="ACCEPT") accept = v;
+      else if(K==="REJECT") reject = v;
+      else if(K==="TAPE") tape = v || "_";
+    } else {
+      // token-only line -> tape
+      const tokenish = raw.split("").every(ch => /[A-Za-z0-9_#]/.test(ch));
+      if(tokenish) tape = raw;
+    }
+  }
+  return { transitions, start, accept, reject, tape };
+}
+
+// run loop using setTimeout (non-blocking)
+function runLoop(){
+  if(!running || !tm) { running = false; return; }
+  const progressed = tm.step();
+  updateUI();
+  drawTape();
+  if(!progressed){
+    running = false;
+    alert("Machine halted in state: " + tm.state);
+    return;
+  }
+  const delay = Math.max(parseFloat(speedInput.value) || 0.2, 0.05) * 1000;
+  runTimer = setTimeout(runLoop, delay);
+}
+
+function updateUI(){
+  if(!tm){ stateText.textContent = "-"; tapeLen.textContent = "-"; return; }
+  stateText.textContent = tm.state;
+  tapeLen.textContent = tm.tape.length;
+}
+
+// Auto-scrolling drawTape() — follows the head automatically
+let viewOffset = 0; // keeps track of where our window starts
+
+function drawTape() {
+  const canvas = document.getElementById("tapeCanvas");
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const cellW = 45;
+  const cellH = 50;
+  const maxVisible = 31; // total visible cells
+  const tape = tm.tape;
+  const head = tm.head;
+
+  // ---- Adjust viewOffset to keep head centered ----
+  const half = Math.floor(maxVisible / 2);
+  if (head < viewOffset + half - 4) {
+    viewOffset = Math.max(0, head - half + 4);
+  } else if (head > viewOffset + half + 4) {
+    viewOffset = Math.min(tape.length - maxVisible, head - half - 4);
+  }
+
+  // Ensure viewOffset stays valid
+  if (viewOffset < 0) viewOffset = 0;
+  if (viewOffset > Math.max(0, tape.length - maxVisible)) {
+    viewOffset = Math.max(0, tape.length - maxVisible);
+  }
+
+  const left = Math.floor(viewOffset);
+  const right = Math.min(tape.length, left + maxVisible);
+  const visible = tape.slice(left, right);
+
+  const startX = (canvas.width - visible.length * cellW) / 2;
+  const y = 160;
+
+  // ---- Draw tape cells ----
+  for (let i = 0; i < visible.length; i++) {
+    const x = startX + i * cellW;
+    const absIndex = left + i;
+    const sym = visible[i];
+
+    const fillColor = absIndex === head ? "#d4bfff" : "#cccccc";
+    ctx.fillStyle = fillColor;
+    ctx.strokeStyle = "#333";
+    ctx.lineWidth = 2;
+    ctx.fillRect(x, y, cellW, cellH);
+    ctx.strokeRect(x, y, cellW, cellH);
+
+    ctx.fillStyle = "black";
+    ctx.font = "bold 20px Consolas";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(sym, x + cellW / 2, y + cellH / 2);
+
+    if (absIndex === head) {
+      ctx.fillStyle = "red";
+      ctx.beginPath();
+      ctx.moveTo(x + cellW / 2, y - 20);
+      ctx.lineTo(x + cellW / 2 - 10, y - 5);
+      ctx.lineTo(x + cellW / 2 + 10, y - 5);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  // ---- Update info text ----
+  document.getElementById("stateInfo").textContent = `State: ${tm.state}`;
+  document.getElementById("tapeInfo").textContent = `Head at: ${tm.head}, Tape length: ${tape.length}`;
+}
+
+
+
+// auto-load a default example on open
+window.addEventListener("load", () => {
+  examples.value = "Move right until blank";
+  desc.value = SAMPLE["Move right until blank"];
+  parseBtn.click();
+});
+</script>
+</body>
+</html>
